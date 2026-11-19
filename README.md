@@ -1,4 +1,4 @@
-This is a simple URDFParser which works for serial manipulators when an URDF file is provided, examples given in `GetRobot.py`. Implemented RNEA and CRBA algorithm for forward and inverse dynamics.
+This is a simple URDFParser which works for serial manipulators when an URDF file is provided, examples of usage given in `GetRobot.py`. Implemented RNEA and CRBA algorithm for forward and inverse dynamics using screw and twist representations of joints
 
 ToDo:
 1. Implement ABA algorithm
