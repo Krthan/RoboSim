@@ -125,7 +125,56 @@ def crba_algorithm(robot, q: np.ndarray) -> np.ndarray:
     
 
 def aba_algorithm(robot, q, dq, tau, gravity):
-    raise NotImplementedError("ABA is not implemented yet")
+    links, joints = robot.links, robot.joints
+    n = len(joints)
+    
+    q = np.asarray(q, dtype=float).ravel()
+    dq = np.asarray(dq, dtype=float).ravel()
+    tau = np.asarray(tau, dtype=float).ravel()
+    gravity = np.asarray(gravity, dtype=float).ravel()
+    
+    Ad_inv = [getAdjointInv(joints[i].getrelativeTransform(links[i].M_rel_home, q[i])) for i in range(n)]
+    S = [j.S.ravel() for j in joints]
+    
+    v = [None] * n
+    c = [None] * n
+    IA = [links[i].InertiaMatrix.copy() for i in range(n)]
+    pA = [None] * n
+    
+    v_prev = np.zeros(6)
+    for i in range(n):
+        v[i] = Ad_inv[i] @ v_prev + S[i] * dq[i]
+        c[i] = createAdjoint(v[i]) @ (S[i] * dq[i])
+        pA[i] = -createAdjoint(v[i]).T @ (links[i].InertiaMatrix @ v[i])
+        v_prev = v[i]
+    
+    U = [None] * n
+    D = np.zeros(n)
+    u = np.zeros(n)
+    for i in reversed(range(n)):
+        U[i] = IA[i] @ S[i]
+        D[i] = S[i] @ U[i]
+        if D[i] < 1e-12:
+            raise ValueError(
+                f"Joint '{joints[i].name}' has zero effective inertia (D={D[i]:.3g}): "
+                "the link and everything beyond it are massless, so its acceleration is undefined."
+            )
+        u[i] = tau[i] - S[i] @ pA[i]
+        if i > 0:
+            Ia = IA[i] - np.outer(U[i], U[i]) / D[i]
+            pa = pA[i] + Ia @ c[i] + U[i] * (u[i] / D[i])
+            IA[i-1] += Ad_inv[i].T @ Ia @ Ad_inv[i]
+            pA[i-1] += Ad_inv[i].T @ pa
+            
+    
+    a_prev = np.concatenate([np.zeros(3), -gravity])
+    ddq = np.zeros(n)
+    for i in range(n):
+        a_p = Ad_inv[i] @ a_prev + c[i]
+        ddq[i] = (u[i] - U[i] @ a_p) / D[i]
+        a_prev = a_p + S[i] * ddq[i]
+    
+    return ddq
         
     
 class Link:
@@ -186,7 +235,16 @@ class Robot:
             # bias = C(q, dq)dq + g(q)
             bias = self.inverse_dynamics(q, dq, np.zeros(n), gravity).ravel()
             M = crba_algorithm(self, q)
-            return np.linalg.solve(M, tau - bias)
+            for i in range(n):
+                if M[i, i] < 1e-12:
+                    raise ValueError(
+                        f"Joint '{self.joints[i].name}' has zero effective inertia (M[{i},{i}]={M[i, i]:.3g}): "
+                        "the link and everything beyond it are massless, so its acceleration is undefined."
+                    )
+            try:
+                return np.linalg.solve(M, tau - bias)
+            except np.linalg.LinAlgError as e:
+                raise ValueError("Mass matrix is singular; forward dynamics is undefined for this configuration.") from e
         elif algorithm == "aba":
             return aba_algorithm(self, q, dq, tau, gravity)
         raise ValueError(f"{algorithm} is not a valid algorithm")
