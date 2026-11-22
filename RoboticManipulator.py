@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Literal
 np.set_printoptions(precision=6, suppress=True)
+from scipy.optimize import minimize
 
 class Rotation:
     @staticmethod
@@ -217,13 +218,117 @@ class Robot:
         self.joints = joints
         self.links = links
     
-    def forward_kinematics(self, q_values: list[float]) -> Transform:
+    def body_jacobian(self, q, k=None):
+        """
+        Returns body jacobian of body
+        
+        """
+        q = np.asarray(q, dtype=float).ravel()
+        n = len(self.joints)
+        k = n-1 if k is None else k
+        J = np.zeros((6, n))
+        for i in range(k+1):
+            T_i = self.joints[i].getrelativeTransform(self.links[i].M_rel_home, q[i])
+            J = getAdjointInv(T_i) @ J
+            J[:, i] = self.joints[i].S.ravel()
+        
+        return J
+    
+    def space_jacobian(self, q, k=None):
+        """
+        Returns the space jacobian of the robot 
+        
+        """
+        
+        J_body = self.body_jacobian(q)
+        p, R = self.forward_kinematics(q)
+        J_s = np.linalg.inv(getAdjointInv(Transform(p, R))) @ J_body
+        
+        return J_s
+    
+    def forward_kinematics(self, q_values: list[float]) -> tuple[(np.ndarray, np.ndarray)]:
+        """
+        Returns the position and rotation of the end-effector with respect to the base frame of the robot given the joint angles array
+        
+        """
         n = len(self.joints)
         q = np.asarray(q_values, dtype=float).ravel()
         T = Transform(np.zeros(3), np.eye(3))
         for i in range(n):
             T = T @ self.joints[i].getrelativeTransform(self.links[i].M_rel_home, q[i])
-        return T
+        return T.p, T.R
+    
+    def inverse_kinematics(self, pos: list[float], initial_guess: np.ndarray, method: str = "lm", tol: float = 1e-6, Nmax: int = 500, **kwargs) -> np.ndarray:
+        """
+        Returns the joint angles of the robot when given the spatial position of the end-effector
+        
+        """
+        pos = np.asarray(pos, dtype=float).ravel()
+        q = np.asarray(initial_guess, dtype=float).ravel().copy()
+        
+        method = method.lower()
+        
+        if method == "lm":
+            return self._ik_lm(pos, q, tol=tol, Nmax=Nmax, **kwargs)
+        
+        elif method == "opt":
+            return self._ik_opt(pos, q, tol=tol, Nmax=max(Nmax, 1000), **kwargs)
+        
+        else:
+            raise ValueError(f"{method} is not a valid method, choose between 'lm' or 'opt")
+        
+        
+    def _ik_lm(self, pos: np.ndarray, q0: np.ndarray, tol: float, Nmax: int, step_size: float = 0.5, LM_factor: float = 1e-2) -> np.ndarray:
+        """
+        Levenberg-Marquardt (damped least squares) solver
+
+        """
+        q = q0.copy()
+        for _ in range(Nmax):
+            x_curr, R = self.forward_kinematics(q)
+            err = pos - x_curr.ravel()
+            if np.linalg.norm(err) < tol:
+                return q
+            
+            Jp = R @ self.body_jacobian(q)[3:, :]
+            dq = Jp.T @ np.linalg.solve(Jp @ Jp.T + LM_factor**2 * np.eye(3), err)
+            q = q + step_size * dq
+        
+        raise RuntimeError(f"IK did not converge in {Nmax} iterations (residual {np.linalg.norm(err):.3g})")
+    
+    def _ik_opt(self, pos: np.ndarray, q0: np.ndarray, tol: float, Nmax: int, solver: str = "SLSQP", bounds: list[tuple[float, float]] | None = None, reg_weight: float = 1e-8):
+    
+        """Nonlinear optimization solver using analytical gradients."""
+        
+        def cost_and_grad(q: np.ndarray) -> tuple[float, np.ndarray]:
+            x_curr, R = self.forward_kinematics(q)
+            err = x_curr.ravel() - pos
+            
+            cost = 0.5 * np.dot(err, err) + 0.5 * reg_weight * np.dot(q - q0, q - q0)
+            
+            Jp = R @ self.body_jacobian(q)[3:, :]
+            grad = Jp.T @ err + reg_weight * (q - q0)
+            
+            return cost, grad
+        
+        res = minimize(
+            fun=cost_and_grad,
+            x0=q0,
+            method=solver,
+            jac=True,  
+            bounds=bounds,
+            options={"maxiter": Nmax, "ftol": (1e-2 * tol) ** 2},
+        )
+
+        x_final, _ = self.forward_kinematics(res.x)
+        final_err = np.linalg.norm(pos - x_final.ravel())
+        if final_err > tol:
+            raise RuntimeError(
+                f"Optimization IK did not converge (residual {final_err:.3g}, msg: {res.message})"
+            )
+
+        return res.x
+        
     
     def forward_dynamics(self, algorithm: Literal["crba", "aba"], q: list[float], dq: list[float], tau: list[float], gravity: np.ndarray = np.array([0.0, 0.0, -9.81])):
         n = len(self.joints)
