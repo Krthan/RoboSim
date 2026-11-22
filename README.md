@@ -1,4 +1,4 @@
-This is a simple URDFParser which works for serial manipulators when an URDF file is provided, examples of usage given in `GetRobot.py`. 
+This is a simple Robotic Simulator which works for serial manipulators when an URDF file is provided, examples of usage given in `GetRobot.py`. 
 
 - RNEA algorithm for Forward dynamics
 - CRBA and ABA algorithm for Inverse dynamics 
